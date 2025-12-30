@@ -1,24 +1,63 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
+import { DarkTheme, DefaultTheme, ThemeProvider as NavigationThemeProvider } from '@react-navigation/native';
+import { useFonts } from 'expo-font';
 import { Stack } from 'expo-router';
+import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
-import 'react-native-reanimated';
+import { useEffect } from 'react';
+import { SettingsProvider } from '../context/SettingsContext';
+import { ThemeProvider, useTheme } from '../context/ThemeContext';
+import { createTables, seedDatabase } from '../services/DatabaseService';
 
-import { useColorScheme } from '@/hooks/use-color-scheme';
+// // Prevent the splash screen from auto-hiding before asset loading is complete.
+// SplashScreen.preventAutoHideAsync().catch(() => {
+//   /* reloading the app might trigger some race conditions, ignore them */
+// });
 
-export const unstable_settings = {
-  anchor: '(tabs)',
-};
-
-export default function RootLayout() {
-  const colorScheme = useColorScheme();
+function RootLayoutNav() {
+  const { theme } = useTheme();
 
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+    <NavigationThemeProvider value={theme === 'dark' ? DarkTheme : DefaultTheme}>
       <Stack>
         <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-        <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+        <Stack.Screen name="reader/[...ref]" options={{ headerShown: false, presentation: 'modal' }} />
+        <Stack.Screen name="+not-found" />
       </Stack>
-      <StatusBar style="auto" />
-    </ThemeProvider>
+      <StatusBar style={theme === 'dark' ? 'light' : 'dark'} />
+    </NavigationThemeProvider>
+  );
+}
+
+export default function RootLayout() {
+  const [loaded] = useFonts({
+    SpaceMono: require('../assets/fonts/SpaceMono-Regular.ttf'),
+  });
+
+  useEffect(() => {
+    async function prepare() {
+      try {
+        await createTables();
+        await seedDatabase();
+      } catch (e) {
+        console.warn(e);
+      } finally {
+        if (loaded) {
+          await SplashScreen.hideAsync();
+        }
+      }
+    }
+    prepare();
+  }, [loaded]);
+
+  if (!loaded) {
+    return null;
+  }
+
+  return (
+    <SettingsProvider>
+      <ThemeProvider>
+        <RootLayoutNav />
+      </ThemeProvider>
+    </SettingsProvider>
   );
 }

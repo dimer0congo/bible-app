@@ -1,0 +1,26 @@
+export const Colors = {
+  light: {
+    text: '#11181C',
+    background: '#fff',
+    tint: '#0a7ea4',
+    icon: '#687076',
+    tabIconDefault: '#687076',
+    tabIconSelected: '#0a7ea4',
+    card: '#f9f9f9',
+    border: '#eee',
+    highlight: '#ffd700',
+  },
+  dark: {
+    text: '#ECEDEE',
+    background: '#151718',
+    tint: '#fff',
+    icon: '#9BA1A6',
+    tabIconDefault: '#9BA1A6',
+    tabIconSelected: '#fff',
+    card: '#1E1E1E',
+    border: '#2C2C2C',
+    highlight: '#b8860b',
+  },
+  primary: '#0a7ea4',
+  secondary: '#ff6b6b',
+};
