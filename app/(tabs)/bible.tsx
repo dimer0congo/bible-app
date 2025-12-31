@@ -1,3 +1,6 @@
+import HighlightMenu from '@/components/HighlightMenu';
+import NoteEditor from '@/components/NoteEditor';
+import StudyMenu from '@/components/StudyMenu';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -9,7 +12,7 @@ import BookChapterSelector from '../../components/BookChapterSelector';
 import { BOOK_CHAPTER_COUNTS, getLocalizedBookName } from '../../constants/BibleData';
 import { useSettings } from '../../context/SettingsContext';
 import { useTheme } from '../../context/ThemeContext';
-import { getVerses } from '../../services/DatabaseService';
+import { addHighlight, deleteNote, getHighlights, getNote, getNotesForChapter, getVerses, Note, removeHighlight, saveNote } from '../../services/DatabaseService';
 
 export default function BibleScreen() {
     const { colors } = useTheme();
@@ -33,6 +36,77 @@ export default function BibleScreen() {
     const [historyVisible, setHistoryVisible] = useState(false);
     const [readingHistory, setReadingHistory] = useState<{ book: string, chapter: number, timestamp: number }[]>([]);
 
+    // Highlight State
+    const [highlights, setHighlights] = useState<{ [verse: number]: string }>({});
+    const [notes, setNotes] = useState<{ [verse: number]: Note }>({});
+    const [selectedVerses, setSelectedVerses] = useState<number[]>([]);
+
+    // Note State
+    const [noteVisible, setNoteVisible] = useState(false);
+    const [currentNote, setCurrentNote] = useState('');
+
+    // Study Menu State
+    const [studyMenuVisible, setStudyMenuVisible] = useState(false);
+
+    // Derived state
+    // ...
+
+    // Functions
+    const handleNotePress = async () => {
+        if (selectedVerses.length === 0) return;
+        const sortedVerses = [...selectedVerses].sort((a, b) => a - b);
+        const vNum = sortedVerses[0];
+        const vEnd = sortedVerses.length > 1 ? sortedVerses[sortedVerses.length - 1] : undefined;
+
+        try {
+            const note = await getNote(book, chapter, vNum, vEnd);
+            setCurrentNote(note ? note.content : '');
+            setNoteVisible(true);
+        } catch (e) {
+            console.error("Failed to load note", e);
+        }
+    };
+
+    const handleSaveNote = async (content: string) => {
+        if (selectedVerses.length === 0) return;
+        const sortedVerses = [...selectedVerses].sort((a, b) => a - b);
+        const vNum = sortedVerses[0];
+        const vEnd = sortedVerses.length > 1 ? sortedVerses[sortedVerses.length - 1] : undefined;
+
+        try {
+            await saveNote(book, chapter, vNum, content, vEnd);
+            setNoteVisible(false);
+            loadNotes(); // Refresh notes to show indicator
+        } catch (e) {
+            console.error("Failed to save note", e);
+        }
+    };
+
+    const handleDeleteNote = async () => {
+        if (selectedVerses.length === 0) return;
+        const sortedVerses = [...selectedVerses].sort((a, b) => a - b);
+        const vNum = sortedVerses[0];
+        const vEnd = sortedVerses.length > 1 ? sortedVerses[sortedVerses.length - 1] : undefined;
+
+        try {
+            await deleteNote(book, chapter, vNum, vEnd);
+            setNoteVisible(false);
+            loadNotes(); // Refresh notes to remove indicator
+        } catch (e) {
+            console.error("Failed to delete note", e);
+        }
+    };
+
+    const handleNavigateToVerse = (tBook: string, tChapter: number, tVerse: number) => {
+        setBook(tBook);
+        setChapter(tChapter);
+        // Optional: Scroll to verse (requires ref on BibleText which we might not have yet, 
+        // but setting book/chapter is the main part)
+    };
+
+    // Derived state
+    const highlightMenuVisible = selectedVerses.length > 0;
+
     // Effects
     useEffect(() => {
         if (params.book && params.chapter) {
@@ -47,11 +121,116 @@ export default function BibleScreen() {
 
     useEffect(() => {
         loadVerses();
+        loadHighlights();
+        loadNotes();
     }, [book, chapter, bibleVersion]);
 
     useEffect(() => {
         addToHistory(book, chapter);
     }, [book, chapter]);
+
+    // Functions
+    const loadHighlights = async () => {
+        try {
+            const data = await getHighlights(book, chapter);
+            const map: { [verse: number]: string } = {};
+            data.forEach(h => map[h.verse] = h.color);
+            setHighlights(map);
+        } catch (e) {
+            console.error("Failed to load highlights", e);
+        }
+    };
+
+    const loadNotes = async () => {
+        try {
+            const data = await getNotesForChapter(book, chapter);
+            const map: { [verse: number]: Note } = {};
+            data.forEach(n => {
+                map[n.verse] = n;
+                // If it's a range, mark all verses in the range with the SAME note object
+                if (n.verse_end) {
+                    for (let i = n.verse + 1; i <= n.verse_end; i++) {
+                        map[i] = n;
+                    }
+                }
+            });
+            setNotes(map);
+        } catch (e) {
+            console.error("Failed to load notes", e);
+        }
+    };
+
+    const handleOpenNote = (note: Note) => {
+        setCurrentNote(note.content);
+        // We need to set the context so save/delete works correctly
+        // We can infer the selection from the note
+        const verses: number[] = [];
+        verses.push(note.verse);
+        if (note.verse_end) {
+            for (let i = note.verse + 1; i <= note.verse_end; i++) {
+                verses.push(i);
+            }
+        }
+        setSelectedVerses(verses);
+        setNoteVisible(true);
+    };
+
+    const handleVersePress = (verse: any) => {
+        setSelectedVerses(prev => {
+            if (prev.includes(verse.verse)) {
+                return prev.filter(v => v !== verse.verse);
+            } else {
+                return [...prev, verse.verse];
+            }
+        });
+    };
+
+    const handleClearSelection = () => {
+        setSelectedVerses([]);
+    };
+
+    const handleAddHighlight = async (color: string) => {
+        if (selectedVerses.length === 0) return;
+        try {
+            // Apply to all selected verses
+            await Promise.all(selectedVerses.map(vNum =>
+                addHighlight(book, chapter, vNum, color)
+            ));
+
+            // Update local state
+            setHighlights(prev => {
+                const next = { ...prev };
+                selectedVerses.forEach(vNum => {
+                    next[vNum] = color;
+                });
+                return next;
+            });
+            handleClearSelection();
+        } catch (e) {
+            console.error(e);
+        }
+    };
+
+    const handleRemoveHighlight = async () => {
+        if (selectedVerses.length === 0) return;
+        try {
+            // Remove from all selected verses
+            await Promise.all(selectedVerses.map(vNum =>
+                removeHighlight(book, chapter, vNum)
+            ));
+
+            setHighlights(prev => {
+                const next = { ...prev };
+                selectedVerses.forEach(vNum => {
+                    delete next[vNum];
+                });
+                return next;
+            });
+            handleClearSelection();
+        } catch (e) {
+            console.error(e);
+        }
+    };
 
     // Functions
     const loadHistory = async () => {
@@ -118,7 +297,6 @@ export default function BibleScreen() {
                         <Ionicons name="chevron-back" size={24} color={colors.text} />
                     </TouchableOpacity>
 
-                    // ... in main component ...
                     <TouchableOpacity
                         style={[styles.selectorButton, { backgroundColor: colors.card }]}
                         onPress={() => setSelectorVisible(true)}
@@ -143,6 +321,9 @@ export default function BibleScreen() {
                     <TouchableOpacity onPress={() => setHistoryVisible(true)} style={styles.iconButton}>
                         <Ionicons name="time-outline" size={24} color={colors.text} />
                     </TouchableOpacity>
+                    <TouchableOpacity onPress={() => setStudyMenuVisible(true)} style={styles.iconButton}>
+                        <Ionicons name="book-outline" size={24} color={colors.text} />
+                    </TouchableOpacity>
                 </View>
             </View>
 
@@ -153,7 +334,15 @@ export default function BibleScreen() {
             ) : (
                 <ScrollView contentContainerStyle={{ paddingBottom: 100 }} showsVerticalScrollIndicator={false}>
                     {verses.length > 0 ? (
-                        <BibleText verses={verses} fontSize={fontSize} />
+                        <BibleText
+                            verses={verses}
+                            fontSize={fontSize}
+                            highlights={highlights}
+                            notes={notes}
+                            selectedVerses={selectedVerses}
+                            onVersePress={handleVersePress}
+                            onNotePress={handleOpenNote}
+                        />
                     ) : (
                         <View style={styles.center}>
                             <Text style={{ color: colors.icon }}>No verses found.</Text>
@@ -166,6 +355,7 @@ export default function BibleScreen() {
             <Modal
                 visible={historyVisible}
                 animationType="slide"
+                style={{ backgroundColor: colors.highlight }}
                 presentationStyle="pageSheet"
                 onRequestClose={() => setHistoryVisible(false)}
             >
@@ -210,6 +400,35 @@ export default function BibleScreen() {
                 </View>
             </Modal>
 
+            {/* Highlight Menu (Non-Modal) */}
+            <HighlightMenu
+                visible={highlightMenuVisible}
+                onClose={handleClearSelection}
+                onSelectColor={handleAddHighlight}
+                onRemoveHighlight={handleRemoveHighlight}
+                onNote={handleNotePress}
+                verseNumber={selectedVerses[0]}
+                count={selectedVerses.length}
+            />
+
+            <NoteEditor
+                visible={noteVisible}
+                onClose={() => setNoteVisible(false)}
+                onSave={handleSaveNote}
+                onDelete={handleDeleteNote}
+                initialContent={currentNote}
+                book={book}
+                chapter={chapter}
+                verse={selectedVerses.length > 0 ? Math.min(...selectedVerses) : 0}
+                verseEnd={selectedVerses.length > 1 ? Math.max(...selectedVerses) : undefined}
+            />
+
+            <StudyMenu
+                visible={studyMenuVisible}
+                onClose={() => setStudyMenuVisible(false)}
+                onNavigateToVerse={handleNavigateToVerse}
+            />
+
             <BookChapterSelector
                 visible={selectorVisible}
                 onClose={() => setSelectorVisible(false)}
@@ -225,13 +444,44 @@ const styles = StyleSheet.create({
     container: { flex: 1 },
     header: {
         flexDirection: 'row',
+        paddingTop: 10,
+        paddingBottom: 10,
+        paddingHorizontal: 20,
         alignItems: 'center',
         justifyContent: 'space-between',
-        paddingHorizontal: 16,
-        paddingVertical: 12,
         borderBottomWidth: 1,
     },
-    navGroup: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+    studyMenuButton: {
+        width: 40,
+        height: 40,
+        borderRadius: 20,
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    navGroup: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+    },
+
+    bookSelector: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 16,
+        paddingVertical: 8,
+        borderRadius: 20,
+        gap: 8,
+    },
+    menuButton: {
+        width: 40,
+        height: 40,
+        borderRadius: 20,
+        justifyContent: 'center',
+        alignItems: 'center',
+    },
+    bookSelectorText: {
+        flexDirection: 'row', alignItems: 'center', gap: 8
+    },
     settingsGroup: { flexDirection: 'row', alignItems: 'center', gap: 4 },
     selectorButton: {
         flexDirection: 'row',

@@ -50,10 +50,28 @@ export const createTables = async () => {
         book TEXT,
         chapter INTEGER,
         verse INTEGER,
+        verse_end INTEGER,
         content TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
   `);
+
+    await runMigrations(db);
+};
+
+const runMigrations = async (db: SQLite.SQLiteDatabase) => {
+    try {
+        // Check if verse_end column exists in notes
+        const result = await db.getAllAsync<{ name: string }>('PRAGMA table_info(notes)');
+        const hasVerseEnd = result.some(col => col.name === 'verse_end');
+
+        if (!hasVerseEnd) {
+            console.log("Migrating database: Adding verse_end to notes table");
+            await db.execAsync('ALTER TABLE notes ADD COLUMN verse_end INTEGER');
+        }
+    } catch (e) {
+        console.error("Migration failed:", e);
+    }
 };
 
 const insertBibleVersion = async (db: SQLite.SQLiteDatabase, data: any[], version: string) => {
@@ -159,4 +177,79 @@ export const getVerses = async (book: string, chapter: number, version: string =
 export const searchVerses = async (query: string, version: string = 'KJV') => {
     const db = await getDBConnection();
     return await db.getAllAsync('SELECT * FROM verses WHERE text LIKE ? AND version = ?', [`%${query}%`, version]);
+};
+
+export interface Highlight {
+    id: number;
+    book: string;
+    chapter: number;
+    verse: number;
+    color: string;
+}
+
+export const getHighlights = async (book: string, chapter: number) => {
+    const db = await getDBConnection();
+    return await db.getAllAsync<Highlight>('SELECT * FROM highlights WHERE book = ? AND chapter = ?', [book, chapter]);
+};
+
+export const getAllHighlights = async () => {
+    const db = await getDBConnection();
+    return await db.getAllAsync<Highlight>('SELECT * FROM highlights ORDER BY book, chapter, verse ASC');
+};
+
+export const addHighlight = async (book: string, chapter: number, verse: number, color: string) => {
+    const db = await getDBConnection();
+    // Remove existing highlight for this verse first (if any) to avoid duplicates/conflicts
+    await db.runAsync('DELETE FROM highlights WHERE book = ? AND chapter = ? AND verse = ?', [book, chapter, verse]);
+    return await db.runAsync('INSERT INTO highlights (book, chapter, verse, color) VALUES (?, ?, ?, ?)', [book, chapter, verse, color]);
+};
+
+export const removeHighlight = async (book: string, chapter: number, verse: number) => {
+    const db = await getDBConnection();
+    return await db.runAsync('DELETE FROM highlights WHERE book = ? AND chapter = ? AND verse = ?', [book, chapter, verse]);
+};
+export interface Note {
+    id: number;
+    book: string;
+    chapter: number;
+    verse: number;
+    verse_end: number | null;
+    content: string;
+    created_at: string;
+}
+
+export const getNotesForChapter = async (book: string, chapter: number) => {
+    const db = await getDBConnection();
+    return await db.getAllAsync<Note>('SELECT * FROM notes WHERE book = ? AND chapter = ?', [book, chapter]);
+};
+
+export const getNote = async (book: string, chapter: number, verse: number, verseEnd?: number) => {
+    const db = await getDBConnection();
+    if (verseEnd && verseEnd !== verse) {
+        return await db.getFirstAsync<Note>('SELECT * FROM notes WHERE book = ? AND chapter = ? AND verse = ? AND verse_end = ?', [book, chapter, verse, verseEnd]);
+    } else {
+        return await db.getFirstAsync<Note>('SELECT * FROM notes WHERE book = ? AND chapter = ? AND verse = ? AND (verse_end IS NULL OR verse_end = verse)', [book, chapter, verse]);
+    }
+};
+
+export const saveNote = async (book: string, chapter: number, verse: number, content: string, verseEnd?: number) => {
+    const db = await getDBConnection();
+    const actualVerseEnd = verseEnd && verseEnd !== verse ? verseEnd : null;
+
+    // Check if note exists
+    const existing = await getNote(book, chapter, verse, verseEnd);
+    if (existing) {
+        return await db.runAsync('UPDATE notes SET content = ?, verse_end = ?, created_at = CURRENT_TIMESTAMP WHERE id = ?', [content, actualVerseEnd, existing.id]);
+    } else {
+        return await db.runAsync('INSERT INTO notes (book, chapter, verse, verse_end, content) VALUES (?, ?, ?, ?, ?)', [book, chapter, verse, actualVerseEnd, content]);
+    }
+};
+
+export const deleteNote = async (book: string, chapter: number, verse: number, verseEnd?: number) => {
+    const db = await getDBConnection();
+    if (verseEnd && verseEnd !== verse) {
+        return await db.runAsync('DELETE FROM notes WHERE book = ? AND chapter = ? AND verse = ? AND verse_end = ?', [book, chapter, verse, verseEnd]);
+    } else {
+        return await db.runAsync('DELETE FROM notes WHERE book = ? AND chapter = ? AND verse = ? AND (verse_end IS NULL OR verse_end = verse)', [book, chapter, verse]);
+    }
 };
