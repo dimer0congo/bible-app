@@ -1,18 +1,21 @@
 import HighlightMenu from '@/components/HighlightMenu';
 import NoteEditor from '@/components/NoteEditor';
+import NoteViewer from '@/components/NoteViewer';
 import StudyMenu from '@/components/StudyMenu';
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Clipboard from 'expo-clipboard';
+import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, ScrollView, Share, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import BibleText from '../../components/BibleText';
 import BookChapterSelector from '../../components/BookChapterSelector';
 import { BOOK_CHAPTER_COUNTS, getLocalizedBookName } from '../../constants/BibleData';
 import { useSettings } from '../../context/SettingsContext';
 import { useTheme } from '../../context/ThemeContext';
-import { addHighlight, deleteNote, getHighlights, getNote, getNotesForChapter, getVerses, Note, removeHighlight, saveNote } from '../../services/DatabaseService';
+import { addBookmark, addHighlight, Bookmark, deleteNote, getBookmarksForChapter, getHighlights, getNote, getNotesForChapter, getVerses, Note, removeBookmark, removeHighlight, saveNote } from '../../services/DatabaseService';
 
 export default function BibleScreen() {
     const { colors } = useTheme();
@@ -33,20 +36,29 @@ export default function BibleScreen() {
     const [fontSize, setFontSize] = useState(20);
 
     // History State
-    const [historyVisible, setHistoryVisible] = useState(false);
     const [readingHistory, setReadingHistory] = useState<{ book: string, chapter: number, timestamp: number }[]>([]);
 
-    // Highlight State
+    // Highlight & Bookmark State
     const [highlights, setHighlights] = useState<{ [verse: number]: string }>({});
+    const [bookmarks, setBookmarks] = useState<{ [verse: number]: Bookmark }>({});
     const [notes, setNotes] = useState<{ [verse: number]: Note }>({});
     const [selectedVerses, setSelectedVerses] = useState<number[]>([]);
 
     // Note State
     const [noteVisible, setNoteVisible] = useState(false);
+    const [noteViewerVisible, setNoteViewerVisible] = useState(false);
     const [currentNote, setCurrentNote] = useState('');
+    const [currentNoteDate, setCurrentNoteDate] = useState<string | undefined>();
+    const [activeNoteVerses, setActiveNoteVerses] = useState<number[]>([]);
 
     // Study Menu State
     const [studyMenuVisible, setStudyMenuVisible] = useState(false);
+
+    // Scroll & Flash State
+    const scrollViewRef = useRef<ScrollView>(null);
+    const versePositions = useRef<{ [verse: number]: number }>({});
+    const [flashVerse, setFlashVerse] = useState<number | null>(null);
+    const [pendingScrollVerse, setPendingScrollVerse] = useState<number | null>(null);
 
     // Derived state
     // ...
@@ -61,6 +73,8 @@ export default function BibleScreen() {
         try {
             const note = await getNote(book, chapter, vNum, vEnd);
             setCurrentNote(note ? note.content : '');
+            setCurrentNoteDate(note?.created_at);
+            setActiveNoteVerses(sortedVerses);
             setNoteVisible(true);
         } catch (e) {
             console.error("Failed to load note", e);
@@ -68,14 +82,16 @@ export default function BibleScreen() {
     };
 
     const handleSaveNote = async (content: string) => {
-        if (selectedVerses.length === 0) return;
-        const sortedVerses = [...selectedVerses].sort((a, b) => a - b);
+        if (activeNoteVerses.length === 0) return;
+        const sortedVerses = [...activeNoteVerses].sort((a, b) => a - b);
         const vNum = sortedVerses[0];
         const vEnd = sortedVerses.length > 1 ? sortedVerses[sortedVerses.length - 1] : undefined;
 
         try {
             await saveNote(book, chapter, vNum, content, vEnd);
             setNoteVisible(false);
+            setActiveNoteVerses([]);
+            handleClearSelection(); // Clear selection if any after saving
             loadNotes(); // Refresh notes to show indicator
         } catch (e) {
             console.error("Failed to save note", e);
@@ -83,14 +99,16 @@ export default function BibleScreen() {
     };
 
     const handleDeleteNote = async () => {
-        if (selectedVerses.length === 0) return;
-        const sortedVerses = [...selectedVerses].sort((a, b) => a - b);
+        if (activeNoteVerses.length === 0) return;
+        const sortedVerses = [...activeNoteVerses].sort((a, b) => a - b);
         const vNum = sortedVerses[0];
         const vEnd = sortedVerses.length > 1 ? sortedVerses[sortedVerses.length - 1] : undefined;
 
         try {
             await deleteNote(book, chapter, vNum, vEnd);
             setNoteVisible(false);
+            setNoteViewerVisible(false);
+            setActiveNoteVerses([]);
             loadNotes(); // Refresh notes to remove indicator
         } catch (e) {
             console.error("Failed to delete note", e);
@@ -98,10 +116,51 @@ export default function BibleScreen() {
     };
 
     const handleNavigateToVerse = (tBook: string, tChapter: number, tVerse: number) => {
-        setBook(tBook);
-        setChapter(tChapter);
-        // Optional: Scroll to verse (requires ref on BibleText which we might not have yet, 
-        // but setting book/chapter is the main part)
+        if (tBook === book && tChapter === chapter) {
+            // Same chapter, just scroll
+            scrollToVerse(tVerse);
+        } else {
+            // New chapter, set pending
+            setBook(tBook);
+            setChapter(tChapter);
+            setPendingScrollVerse(tVerse);
+        }
+    };
+
+    const scrollToVerse = (vNum: number) => {
+        const y = versePositions.current[vNum];
+        if (y !== undefined) {
+            scrollViewRef.current?.scrollTo({ y: Math.max(0, y - 20), animated: true });
+            setFlashVerse(vNum);
+            setTimeout(() => setFlashVerse(null), 1000);
+        }
+    };
+
+    const handleVerseLayout = (verse: number, y: number) => {
+        versePositions.current[verse] = y;
+    };
+
+    const handleEditNoteFromMenu = (note: Note) => {
+        // 0. Close the menu first
+        setStudyMenuVisible(false);
+
+        // 1. Navigate to location
+        setBook(note.book);
+        setChapter(note.chapter);
+
+        // 2. Prepare verse context
+        const versesToSelect = [note.verse];
+        if (note.verse_end) {
+            for (let i = note.verse + 1; i <= note.verse_end; i++) {
+                versesToSelect.push(i);
+            }
+        }
+        setActiveNoteVerses(versesToSelect);
+
+        // 3. Open Editor
+        setCurrentNote(note.content);
+        setCurrentNoteDate(note.created_at);
+        setNoteVisible(true);
     };
 
     // Derived state
@@ -122,12 +181,15 @@ export default function BibleScreen() {
     useEffect(() => {
         loadVerses();
         loadHighlights();
+        loadBookmarks();
         loadNotes();
+        // Clear positions when chapter changes
+        versePositions.current = {};
     }, [book, chapter, bibleVersion]);
 
     useEffect(() => {
-        addToHistory(book, chapter);
-    }, [book, chapter]);
+        addToHistory(book, chapter, selectedVerses[0] || 1);
+    }, [book, chapter, selectedVerses[0]]);
 
     // Functions
     const loadHighlights = async () => {
@@ -138,6 +200,17 @@ export default function BibleScreen() {
             setHighlights(map);
         } catch (e) {
             console.error("Failed to load highlights", e);
+        }
+    };
+
+    const loadBookmarks = async () => {
+        try {
+            const data = await getBookmarksForChapter(book, chapter);
+            const map: { [verse: number]: Bookmark } = {};
+            data.forEach(b => map[b.verse] = b);
+            setBookmarks(map);
+        } catch (e) {
+            console.error("Failed to load bookmarks", e);
         }
     };
 
@@ -162,16 +235,20 @@ export default function BibleScreen() {
 
     const handleOpenNote = (note: Note) => {
         setCurrentNote(note.content);
-        // We need to set the context so save/delete works correctly
-        // We can infer the selection from the note
-        const verses: number[] = [];
-        verses.push(note.verse);
+        setCurrentNoteDate(note.created_at);
+        const versesList: number[] = [];
+        versesList.push(note.verse);
         if (note.verse_end) {
             for (let i = note.verse + 1; i <= note.verse_end; i++) {
-                verses.push(i);
+                versesList.push(i);
             }
         }
-        setSelectedVerses(verses);
+        setActiveNoteVerses(versesList);
+        setNoteViewerVisible(true);
+    };
+
+    const handleEditFromViewer = () => {
+        setNoteViewerVisible(false);
         setNoteVisible(true);
     };
 
@@ -232,6 +309,81 @@ export default function BibleScreen() {
         }
     };
 
+    const handleBookmarkToggle = async () => {
+        if (selectedVerses.length === 0) return;
+        const sortedVerses = [...selectedVerses].sort((a, b) => a - b);
+        const vNum = sortedVerses[0];
+        const vEnd = sortedVerses.length > 1 ? sortedVerses[sortedVerses.length - 1] : undefined;
+
+        try {
+            const existing = bookmarks[vNum];
+            if (existing) {
+                await removeBookmark(book, chapter, vNum, vEnd);
+            } else {
+                await addBookmark(book, chapter, vNum, vEnd);
+            }
+            loadBookmarks();
+        } catch (e) {
+            console.error(e);
+        }
+    };
+
+    const handleCopyVerses = async () => {
+        if (selectedVerses.length === 0) return;
+        const sortedVerses = [...selectedVerses].sort((a, b) => a - b);
+        const selected = verses.filter(v => sortedVerses.includes(v.verse)).sort((a, b) => a.verse - b.verse);
+
+        const vNum = sortedVerses[0];
+        const vEnd = sortedVerses.length > 1 ? sortedVerses[sortedVerses.length - 1] : undefined;
+        const reference = vEnd ? `${book} ${chapter}:${vNum}-${vEnd}` : `${book} ${chapter}:${vNum}`;
+
+        const textToCopy = `${reference} (${bibleVersion})\n` + selected.map(v => `${v.verse} ${v.text}`).join('\n');
+
+        try {
+            await Clipboard.setStringAsync(textToCopy);
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+            handleClearSelection();
+        } catch (e) {
+            console.error("Failed to copy text", e);
+        }
+    };
+
+    const handleShareVerses = async () => {
+        if (selectedVerses.length === 0) return;
+        const sortedVerses = [...selectedVerses].sort((a, b) => a - b);
+        const selected = verses.filter(v => sortedVerses.includes(v.verse)).sort((a, b) => a.verse - b.verse);
+
+        const vNum = sortedVerses[0];
+        const vEnd = sortedVerses.length > 1 ? sortedVerses[sortedVerses.length - 1] : undefined;
+        const reference = vEnd ? `${book} ${chapter}:${vNum}-${vEnd}` : `${book} ${chapter}:${vNum}`;
+
+        const textToShare = `📖 ${reference} (${bibleVersion})\n\n` +
+            selected.map(v => `• ${v.text}`).join('\n\n') +
+            `\n\nShared from Bible App 📖`;
+
+        try {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+            await Share.share({
+                message: textToShare,
+                title: reference,
+            });
+            handleClearSelection();
+        } catch (e) {
+            console.error("Failed to share verses", e);
+        }
+    };
+
+    const handleDeleteBookmark = async (bookmark: Bookmark) => {
+        try {
+            await removeBookmark(bookmark.book, bookmark.chapter, bookmark.verse, bookmark.verse_end || undefined);
+            if (bookmark.book === book && bookmark.chapter === chapter) {
+                loadBookmarks(); // Refresh indicators if in same chapter
+            }
+        } catch (e) {
+            console.error("Failed to delete bookmark", e);
+        }
+    };
+
     // Functions
     const loadHistory = async () => {
         try {
@@ -242,8 +394,8 @@ export default function BibleScreen() {
         }
     };
 
-    const addToHistory = async (currentBook: string, currentChapter: number) => {
-        const newItem = { book: currentBook, chapter: currentChapter, timestamp: Date.now() };
+    const addToHistory = async (currentBook: string, currentChapter: number, currentVerse: number = 1) => {
+        const newItem = { book: currentBook, chapter: currentChapter, verse: currentVerse, timestamp: Date.now() };
         setReadingHistory(prev => {
             const filtered = prev.filter(i => !(i.book === currentBook && i.chapter === currentChapter));
             const updated = [newItem, ...filtered].slice(0, 20);
@@ -257,6 +409,14 @@ export default function BibleScreen() {
         try {
             const data = await getVerses(book, chapter, bibleVersion);
             setVerses(data);
+
+            // If we have a pending scroll, wait a bit for layout then scroll
+            if (pendingScrollVerse) {
+                setTimeout(() => {
+                    scrollToVerse(pendingScrollVerse);
+                    setPendingScrollVerse(null);
+                }, 300); // Small delay to ensure layout is captured
+            }
         } catch (e) {
             console.error(e);
         } finally {
@@ -312,14 +472,11 @@ export default function BibleScreen() {
                 </View>
 
                 <View style={styles.settingsGroup}>
-                    <TouchableOpacity onPress={() => setFontSize(Math.max(14, fontSize - 2))} style={styles.iconButton}>
+                    <TouchableOpacity onPress={() => setFontSize(Math.max(18, fontSize - 2))} style={styles.iconButton}>
                         <Text style={{ fontSize: 14, color: colors.text, fontWeight: 'bold' }}>A</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity onPress={() => setFontSize(Math.min(32, fontSize + 2))} style={styles.iconButton}>
+                    <TouchableOpacity onPress={() => setFontSize(Math.min(36, fontSize + 2))} style={styles.iconButton}>
                         <Text style={{ fontSize: 20, color: colors.text, fontWeight: 'bold' }}>A</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity onPress={() => setHistoryVisible(true)} style={styles.iconButton}>
-                        <Ionicons name="time-outline" size={24} color={colors.text} />
                     </TouchableOpacity>
                     <TouchableOpacity onPress={() => setStudyMenuVisible(true)} style={styles.iconButton}>
                         <Ionicons name="book-outline" size={24} color={colors.text} />
@@ -332,7 +489,11 @@ export default function BibleScreen() {
                     <ActivityIndicator size="large" color={colors.tint} />
                 </View>
             ) : (
-                <ScrollView contentContainerStyle={{ paddingBottom: 100 }} showsVerticalScrollIndicator={false}>
+                <ScrollView
+                    ref={scrollViewRef}
+                    contentContainerStyle={{ paddingBottom: 100 }}
+                    showsVerticalScrollIndicator={false}
+                >
                     {verses.length > 0 ? (
                         <BibleText
                             verses={verses}
@@ -340,8 +501,11 @@ export default function BibleScreen() {
                             highlights={highlights}
                             notes={notes}
                             selectedVerses={selectedVerses}
+                            flashVerse={flashVerse}
+                            bookmarks={bookmarks}
                             onVersePress={handleVersePress}
                             onNotePress={handleOpenNote}
+                            onVerseLayout={handleVerseLayout}
                         />
                     ) : (
                         <View style={styles.center}>
@@ -351,54 +515,7 @@ export default function BibleScreen() {
                 </ScrollView>
             )}
 
-            {/* History Modal */}
-            <Modal
-                visible={historyVisible}
-                animationType="slide"
-                style={{ backgroundColor: colors.highlight }}
-                presentationStyle="pageSheet"
-                onRequestClose={() => setHistoryVisible(false)}
-            >
-                <View style={[styles.historyContainer, { backgroundColor: colors.background }]}>
-                    <View style={[styles.header, { borderBottomColor: colors.border }]}>
-                        <Text style={[styles.historyTitle, { color: colors.text }]}>Reading History</Text>
-                        <TouchableOpacity onPress={() => setHistoryVisible(false)}>
-                            <Ionicons name="close" size={24} color={colors.text} />
-                        </TouchableOpacity>
-                    </View>
 
-                    {readingHistory.length === 0 ? (
-                        <View style={styles.center}>
-                            <Text style={{ color: colors.icon }}>No reading history yet.</Text>
-                        </View>
-                    ) : (
-                        <ScrollView contentContainerStyle={styles.historyList}>
-                            {readingHistory.map((item, index) => (
-                                <TouchableOpacity
-                                    key={`${item.book}-${item.chapter}-${item.timestamp}`}
-                                    style={[styles.historyItem, { borderBottomColor: colors.border }]}
-                                    onPress={() => {
-                                        setBook(item.book);
-                                        setChapter(item.chapter);
-                                        router.setParams({ book: item.book, chapter: item.chapter.toString() });
-                                        setHistoryVisible(false);
-                                    }}
-                                >
-                                    <View>
-                                        <Text style={[styles.historyReference, { color: colors.text }]}>
-                                            {item.book} {item.chapter}
-                                        </Text>
-                                        <Text style={[styles.historyTime, { color: colors.icon }]}>
-                                            {new Date(item.timestamp).toLocaleDateString()} {new Date(item.timestamp).toLocaleTimeString()}
-                                        </Text>
-                                    </View>
-                                    <Ionicons name="chevron-forward" size={20} color={colors.icon} />
-                                </TouchableOpacity>
-                            ))}
-                        </ScrollView>
-                    )}
-                </View>
-            </Modal>
 
             {/* Highlight Menu (Non-Modal) */}
             <HighlightMenu
@@ -407,26 +524,62 @@ export default function BibleScreen() {
                 onSelectColor={handleAddHighlight}
                 onRemoveHighlight={handleRemoveHighlight}
                 onNote={handleNotePress}
-                verseNumber={selectedVerses[0]}
-                count={selectedVerses.length}
+                onBookmark={handleBookmarkToggle}
+                onCopy={handleCopyVerses}
+                onShare={handleShareVerses}
+                isBookmarked={selectedVerses.length > 0 && !!bookmarks[Math.min(...selectedVerses)]}
+                book={book}
+                chapter={chapter}
+                selectedVerses={selectedVerses}
             />
 
             <NoteEditor
                 visible={noteVisible}
-                onClose={() => setNoteVisible(false)}
+                onClose={() => {
+                    setNoteVisible(false);
+                    setActiveNoteVerses([]);
+                }}
                 onSave={handleSaveNote}
                 onDelete={handleDeleteNote}
                 initialContent={currentNote}
                 book={book}
                 chapter={chapter}
-                verse={selectedVerses.length > 0 ? Math.min(...selectedVerses) : 0}
-                verseEnd={selectedVerses.length > 1 ? Math.max(...selectedVerses) : undefined}
+                verse={activeNoteVerses.length > 0 ? Math.min(...activeNoteVerses) : 0}
+                verseEnd={activeNoteVerses.length > 1 ? Math.max(...activeNoteVerses) : undefined}
+                verseText={activeNoteVerses.length > 0
+                    ? verses.filter(v => activeNoteVerses.includes(v.verse)).sort((a, b) => a.verse - b.verse)
+                    : undefined
+                }
+            />
+
+            <NoteViewer
+                visible={noteViewerVisible}
+                onClose={() => {
+                    setNoteViewerVisible(false);
+                    setActiveNoteVerses([]);
+                }}
+                onEdit={handleEditFromViewer}
+                onDelete={handleDeleteNote}
+                content={currentNote}
+                book={book}
+                chapter={chapter}
+                verse={activeNoteVerses.length > 0 ? Math.min(...activeNoteVerses) : 0}
+                verseEnd={activeNoteVerses.length > 1 ? Math.max(...activeNoteVerses) : undefined}
+                verseText={activeNoteVerses.length > 0
+                    ? verses.filter(v => activeNoteVerses.includes(v.verse)).sort((a, b) => a.verse - b.verse)
+                    : undefined
+                }
+                createdAt={currentNoteDate}
             />
 
             <StudyMenu
                 visible={studyMenuVisible}
                 onClose={() => setStudyMenuVisible(false)}
                 onNavigateToVerse={handleNavigateToVerse}
+                onEditNote={handleEditNoteFromMenu}
+                onDeleteBookmark={handleDeleteBookmark}
+                history={readingHistory}
+                bibleVersion={bibleVersion}
             />
 
             <BookChapterSelector
