@@ -1,8 +1,10 @@
+import { renderFormattedText } from '@/utils/text_formating';
 import { Ionicons } from '@expo/vector-icons';
 import React from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import Animated, { interpolateColor, useAnimatedStyle, useDerivedValue, withSequence, withTiming } from 'react-native-reanimated';
 import { useTheme } from '../context/ThemeContext';
-import { Note } from '../services/DatabaseService';
+import { Bookmark, Note } from '../services/DatabaseService';
 
 interface Verse {
     id: number;
@@ -19,11 +21,27 @@ interface BibleTextProps {
     fontSize?: number;
     highlights?: { [verse: number]: string }; // Map verse number to color
     notes?: { [verse: number]: Note }; // Map verse number to Note object
+    bookmarks?: { [verse: number]: Bookmark }; // Map verse number to Bookmark object
     selectedVerses?: number[];
+    flashVerse?: number | null;
+    onVerseLayout?: (verse: number, y: number) => void;
 }
 
-export default function BibleText({ verses, onVersePress, onNotePress, fontSize = 20, highlights = {}, notes = {}, selectedVerses = [] }: BibleTextProps) {
+export default function BibleText({
+    verses,
+    onVersePress,
+    onNotePress,
+    fontSize = 20,
+    highlights = {},
+    notes = {},
+    selectedVerses = [],
+    flashVerse,
+    bookmarks = {},
+    onVerseLayout
+}: BibleTextProps) {
     const { colors } = useTheme();
+
+
 
     return (
         <View style={styles.container}>
@@ -31,28 +49,39 @@ export default function BibleText({ verses, onVersePress, onNotePress, fontSize 
                 const highlightColor = highlights[v.verse];
                 const note = notes[v.verse];
                 const isSelected = selectedVerses.includes(v.verse);
-
-                // Only show indicator on the FIRST verse of a note to avoid clutter, 
-                // OR show on all if that's preferred. The map has the note on all its verses.
-                // Let's show it on the first verse ONLY, or maybe a small line on others.
-                // Actually, for simplicity/access, showing on all is fine, but duplicate buttons might be noisy.
-                // Let's check if this is the start verse of the note.
                 const isNoteStart = note && note.verse === v.verse;
-                // If it's part of a range but NOT the start, maybe show a smaller indicator? 
-                // For now, let's just show the full indicator on the start verse to be "expressive" without spamming.
+                const bookmark = bookmarks[v.verse];
+                const isBookmarkStart = bookmark && bookmark.verse === v.verse;
+                const isFlashed = v.verse === flashVerse;
+
+                // Reanimated effect for flash
+                const progress = useDerivedValue(() => {
+                    return isFlashed ? withSequence(withTiming(1, { duration: 300 }), withTiming(0, { duration: 700 })) : 0;
+                }, [isFlashed]);
+
+                const animatedStyle = useAnimatedStyle(() => {
+                    return {
+                        backgroundColor: interpolateColor(
+                            progress.value,
+                            [0, 1],
+                            ['transparent', colors.tint + '40'] // 40 is hex for ~25% opacity
+                        ),
+                    };
+                });
 
                 return (
                     <TouchableOpacity
                         key={v.id}
+                        onLayout={(e) => onVerseLayout && onVerseLayout(v.verse, e.nativeEvent.layout.y)}
                         style={[
                             styles.verseContainer,
                             highlightColor ? { backgroundColor: highlightColor, borderRadius: 4, paddingHorizontal: 4 } : undefined,
-                            isSelected ? { backgroundColor: colors.card, borderColor: colors.tint, borderWidth: 1 } : undefined,
                             { flexDirection: 'column' }
                         ]}
                         onPress={() => onVersePress && onVersePress(v)}
                         activeOpacity={0.7}
                     >
+                        <Animated.View style={[styles.flashOverlay, animatedStyle]} pointerEvents="none" />
                         <Text
                             style={[
                                 styles.text,
@@ -60,14 +89,19 @@ export default function BibleText({ verses, onVersePress, onNotePress, fontSize 
                                     color: colors.text,
                                     fontSize,
                                     lineHeight: fontSize * 1.5,
-                                    fontFamily: 'Georgia' // Switched to Georgia for better readability nicely
-                                }
+                                    // fontFamily: 'Georgia',
+                                },
+                                isSelected ? {
+                                    textDecorationLine: 'underline',
+                                    textDecorationStyle: 'dotted',
+                                    textDecorationColor: colors.tint
+                                } : undefined
                             ]}
                         >
                             <Text style={[styles.verseNumber, { color: colors.tint, fontSize: fontSize * 0.6 }]}>
                                 {v.verse}{' '}
                             </Text>
-                            {v.text}
+                            {renderFormattedText(v.text)}
                         </Text>
 
                         {isNoteStart && (
@@ -77,6 +111,15 @@ export default function BibleText({ verses, onVersePress, onNotePress, fontSize 
                             >
                                 <Ionicons name="document-text" size={16} color={colors.tint} />
                                 <Text style={[styles.noteText, { color: colors.tint }]}>View Note</Text>
+                            </TouchableOpacity>
+                        )}
+
+                        {isBookmarkStart && (
+                            <TouchableOpacity style={[styles.bookmarkIndicator, { backgroundColor: colors.tint + '15', borderColor: colors.tint + '30' }]}>
+                                <Ionicons name="bookmark" size={16} color={colors.tint} />
+                                <Text style={[styles.bookmarkText, { color: colors.tint }]}>
+                                    {bookmark.verse}{bookmark.verse_end ? `-${bookmark.verse_end}` : ''}
+                                </Text>
                             </TouchableOpacity>
                         )}
                     </TouchableOpacity>
@@ -94,6 +137,13 @@ const styles = StyleSheet.create({
     verseContainer: {
         marginBottom: 12,
         paddingVertical: 4,
+        position: 'relative',
+        borderRadius: 4,
+        overflow: 'hidden',
+    },
+    flashOverlay: {
+        ...StyleSheet.absoluteFillObject,
+        zIndex: -1,
     },
     text: {
         textAlign: 'left', // Justify can look weird on mobile sometimes
@@ -106,7 +156,7 @@ const styles = StyleSheet.create({
     noteButton: {
         flexDirection: 'row',
         alignItems: 'center',
-        alignSelf: 'flex-start',
+        alignSelf: 'flex-end',
         marginTop: 8,
         paddingVertical: 6,
         paddingHorizontal: 12,
@@ -117,5 +167,20 @@ const styles = StyleSheet.create({
     noteText: {
         fontSize: 14,
         fontWeight: '500',
+    },
+    bookmarkIndicator: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        alignSelf: 'center',
+        marginTop: 4,
+        paddingVertical: 6,
+        paddingHorizontal: 12,
+        borderRadius: 12,
+        borderWidth: 1,
+        gap: 4,
+    },
+    bookmarkText: {
+        fontSize: 11,
+        fontWeight: 'bold',
     }
 });

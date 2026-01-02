@@ -9,14 +9,42 @@ interface HighlightMenuProps {
     onSelectColor: (color: string) => void;
     onRemoveHighlight: () => void;
     onNote: () => void;
-    verseNumber?: number;
+    onBookmark: () => void;
+    onCopy: () => void;
+    onShare: () => void;
+    isBookmarked: boolean;
+    book: string;
+    chapter: number;
+    selectedVerses: number[];
 }
 
-export default function HighlightMenu({ visible, onClose, onSelectColor, onRemoveHighlight, onNote, verseNumber, count }: HighlightMenuProps & { count?: number }) {
+export default function HighlightMenu({
+    visible,
+    onClose,
+    onSelectColor,
+    onRemoveHighlight,
+    onNote,
+    onBookmark,
+    isBookmarked,
+    book,
+    chapter,
+    selectedVerses,
+    onCopy,
+    onShare
+}: HighlightMenuProps) {
     const { colors } = useTheme();
     const colorsList = ['#fef3c7', '#dcfce7', '#dbeafe', '#fce7f3'];
 
     if (!visible) return null;
+
+    const sortedVerses = [...selectedVerses].sort((a, b) => a - b);
+    const startVerse = sortedVerses[0];
+    const endVerse = sortedVerses.length > 1 ? sortedVerses[sortedVerses.length - 1] : undefined;
+
+    const verseReference = endVerse && endVerse !== startVerse
+        ? `${book} ${chapter}:${startVerse}-${endVerse}`
+        : `${book} ${chapter}:${startVerse}`;
+
 
     return (
         <View style={[styles.highlightMenu, { backgroundColor: colors.background, borderColor: colors.border }]}>
@@ -32,15 +60,21 @@ export default function HighlightMenu({ visible, onClose, onSelectColor, onRemov
                         <Ionicons name="create-outline" size={20} color={colors.text} />
                         <Text style={[styles.actionButtonText, { color: colors.text }]}>Note</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity style={styles.actionButton} onPress={() => console.log('Bookmark')}>
-                        <Ionicons name="bookmark-outline" size={20} color={colors.text} />
-                        <Text style={[styles.actionButtonText, { color: colors.text }]}>Bookmark</Text>
+                    <TouchableOpacity style={styles.actionButton} onPress={onBookmark}>
+                        <Ionicons
+                            name={isBookmarked ? "bookmark" : "bookmark-outline"}
+                            size={20}
+                            color={isBookmarked ? colors.tint : colors.text}
+                        />
+                        <Text style={[styles.actionButtonText, { color: isBookmarked ? colors.tint : colors.text }]}>
+                            {isBookmarked ? 'Saved' : 'Save'}
+                        </Text>
                     </TouchableOpacity>
-                    <TouchableOpacity style={styles.actionButton} onPress={() => console.log('Share')}>
+                    <TouchableOpacity style={styles.actionButton} onPress={onShare}>
                         <Ionicons name="share-outline" size={20} color={colors.text} />
                         <Text style={[styles.actionButtonText, { color: colors.text }]}>Share</Text>
                     </TouchableOpacity>
-                    <TouchableOpacity style={styles.actionButton} onPress={() => console.log('Copy')}>
+                    <TouchableOpacity style={styles.actionButton} onPress={onCopy}>
                         <Ionicons name="copy-outline" size={20} color={colors.text} />
                         <Text style={[styles.actionButtonText, { color: colors.text }]}>Copy</Text>
                     </TouchableOpacity>
@@ -51,7 +85,7 @@ export default function HighlightMenu({ visible, onClose, onSelectColor, onRemov
 
             <View style={styles.headerRow}>
                 <Text style={[styles.menuTitle, { color: colors.text }]}>
-                    {count && count > 1 ? `Highlight ${count} Verses` : `Highlight Verse ${verseNumber}`}
+                    {verseReference}
                 </Text>
             </View>
 
@@ -84,7 +118,7 @@ const styles = StyleSheet.create({
         left: 0,
         right: 0,
         padding: 24,
-        paddingBottom: 48,
+        paddingBottom: 8,
         borderTopLeftRadius: 24,
         borderTopRightRadius: 24,
         borderWidth: 1,

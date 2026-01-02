@@ -43,6 +43,7 @@ export const createTables = async () => {
         book TEXT,
         chapter INTEGER,
         verse INTEGER,
+        verse_end INTEGER,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE IF NOT EXISTS notes (
@@ -68,6 +69,15 @@ const runMigrations = async (db: SQLite.SQLiteDatabase) => {
         if (!hasVerseEnd) {
             console.log("Migrating database: Adding verse_end to notes table");
             await db.execAsync('ALTER TABLE notes ADD COLUMN verse_end INTEGER');
+        }
+
+        // Check if verse_end column exists in bookmarks
+        const bookmarkResult = await db.getAllAsync<{ name: string }>('PRAGMA table_info(bookmarks)');
+        const hasBookmarkVerseEnd = bookmarkResult.some(col => col.name === 'verse_end');
+
+        if (!hasBookmarkVerseEnd) {
+            console.log("Migrating database: Adding verse_end to bookmarks table");
+            await db.execAsync('ALTER TABLE bookmarks ADD COLUMN verse_end INTEGER');
         }
     } catch (e) {
         console.error("Migration failed:", e);
@@ -185,6 +195,7 @@ export interface Highlight {
     chapter: number;
     verse: number;
     color: string;
+    created_at: string;
 }
 
 export const getHighlights = async (book: string, chapter: number) => {
@@ -192,9 +203,14 @@ export const getHighlights = async (book: string, chapter: number) => {
     return await db.getAllAsync<Highlight>('SELECT * FROM highlights WHERE book = ? AND chapter = ?', [book, chapter]);
 };
 
-export const getAllHighlights = async () => {
+export const getAllHighlights = async (version: string = 'kjv') => {
     const db = await getDBConnection();
-    return await db.getAllAsync<Highlight>('SELECT * FROM highlights ORDER BY book, chapter, verse ASC');
+    return await db.getAllAsync<Highlight & { text: string }>(`
+        SELECT h.*, v.text 
+        FROM highlights h 
+        LEFT JOIN verses v ON h.book = v.book AND h.chapter = v.chapter AND h.verse = v.verse AND v.version = ?
+        ORDER BY h.created_at DESC
+    `, [version]);
 };
 
 export const addHighlight = async (book: string, chapter: number, verse: number, color: string) => {
@@ -232,6 +248,11 @@ export const getNote = async (book: string, chapter: number, verse: number, vers
     }
 };
 
+export const getAllNotes = async () => {
+    const db = await getDBConnection();
+    return await db.getAllAsync<Note>('SELECT * FROM notes ORDER BY created_at DESC');
+};
+
 export const saveNote = async (book: string, chapter: number, verse: number, content: string, verseEnd?: number) => {
     const db = await getDBConnection();
     const actualVerseEnd = verseEnd && verseEnd !== verse ? verseEnd : null;
@@ -251,5 +272,58 @@ export const deleteNote = async (book: string, chapter: number, verse: number, v
         return await db.runAsync('DELETE FROM notes WHERE book = ? AND chapter = ? AND verse = ? AND verse_end = ?', [book, chapter, verse, verseEnd]);
     } else {
         return await db.runAsync('DELETE FROM notes WHERE book = ? AND chapter = ? AND verse = ? AND (verse_end IS NULL OR verse_end = verse)', [book, chapter, verse]);
+    }
+};
+export interface Bookmark {
+    id: number;
+    book: string;
+    chapter: number;
+    verse: number;
+    verse_end: number | null;
+    created_at: string;
+}
+
+export const getBookmarksForChapter = async (book: string, chapter: number) => {
+    const db = await getDBConnection();
+    return await db.getAllAsync<Bookmark>('SELECT * FROM bookmarks WHERE book = ? AND chapter = ?', [book, chapter]);
+};
+
+export const getBookmark = async (book: string, chapter: number, verse: number, verseEnd?: number) => {
+    const db = await getDBConnection();
+    if (verseEnd && verseEnd !== verse) {
+        return await db.getFirstAsync<Bookmark>('SELECT * FROM bookmarks WHERE book = ? AND chapter = ? AND verse = ? AND verse_end = ?', [book, chapter, verse, verseEnd]);
+    } else {
+        return await db.getFirstAsync<Bookmark>('SELECT * FROM bookmarks WHERE book = ? AND chapter = ? AND verse = ? AND (verse_end IS NULL OR verse_end = verse)', [book, chapter, verse]);
+    }
+};
+
+export const getAllBookmarks = async (version: string = 'KJV') => {
+    const db = await getDBConnection();
+    return await db.getAllAsync<Bookmark & { text: string }>(`
+        SELECT b.*, v.text 
+        FROM bookmarks b
+        LEFT JOIN verses v ON b.book = v.book AND b.chapter = v.chapter AND b.verse = v.verse AND v.version = ?
+        ORDER BY b.created_at DESC
+    `, [version]);
+};
+
+export const addBookmark = async (book: string, chapter: number, verse: number, verseEnd?: number) => {
+    const db = await getDBConnection();
+    const actualVerseEnd = verseEnd && verseEnd !== verse ? verseEnd : null;
+
+    // Check if already bookmarked
+    const existing = await getBookmark(book, chapter, verse, verseEnd);
+    if (!existing) {
+        return await db.runAsync('INSERT INTO bookmarks (book, chapter, verse, verse_end) VALUES (?, ?, ?, ?)', [book, chapter, verse, actualVerseEnd]);
+    }
+    return null;
+};
+
+export const removeBookmark = async (book: string, chapter: number, verse: number, verseEnd?: number) => {
+    const db = await getDBConnection();
+    if (verseEnd && verseEnd !== verse) {
+        return await db.runAsync('DELETE FROM bookmarks WHERE book = ? AND chapter = ? AND verse = ? AND verse_end = ?', [book, chapter, verse, verseEnd]);
+    } else {
+        return await db.runAsync('DELETE FROM bookmarks WHERE book = ? AND chapter = ? AND verse = ? AND (verse_end IS NULL OR verse_end = verse)', [book, chapter, verse]);
     }
 };
